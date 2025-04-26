@@ -170,21 +170,16 @@ print(firstbatch[0].shape)
 
 
 
-
-
-
-
-
-
 ######       Creating Attention Mechanism  #########
-
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_in: int, d_out:int, context_length: float, dropout: float,num_heads: int, qkv_bias: bool = False):
+
+    def __init__(self, d_in: int, d_out: int, context_length: int,
+                 dropout: float, num_heads: int, qkv_bias: bool = False):
         super(MultiHeadAttention, self).__init__()
-        assert d_out % num_heads == 0
+        assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
         self.d_out = d_out
         self.num_heads = num_heads
-        self.head_dims = d_out // num_heads
+        self.head_dim = d_out // num_heads
 
         self.w_queries = nn.Linear(d_in, d_out, bias=qkv_bias)
         self.w_keys = nn.Linear(d_in, d_out, bias=qkv_bias)
@@ -194,42 +189,40 @@ class MultiHeadAttention(nn.Module):
         
         self.register_buffer(
             'mask',
-            torch.trill(torch.ones(context_length, context_length)).unsqueeze(0).unsqueeze(0)
+            torch.tril(torch.ones(context_length, context_length)).unsqueeze(0).unsqueeze(0)
         )
 
     def forward(self, x):
         batches, num_tokens, dim_in = x.shape
-        # Linear Projections
+
+        # Linear projections
         queries = self.w_queries(x)
         keys = self.w_keys(x)
         values = self.w_values(x)
 
-        # Reshaping and Transposing for multihead Attenstion
-
+        # Reshape and transpose for multi-head attention
         queries = queries.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
         keys = keys.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
         values = values.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Attention Score Calculations
+        # Attention score calculation
+        attn_scores = (queries @ keys.transpose(2, 3)) / (self.head_dim ** 0.5)
 
-        attn_score = (queries @ keys.transpose(2, 3)) / (self.head_dims ** 0.5)
-
-         # Applying Mask
+        # Apply mask: Broadcasting across batches and heads
         attn_scores = attn_scores.masked_fill(self.mask[:, :, :num_tokens, :num_tokens] == 0, float('-inf'))
 
         # Softmax to get attention weights
-
         attn_weights = torch.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
+        # Context vector computation
         context_vec = (attn_weights @ values).transpose(1, 2)
         context_vec = context_vec.contiguous().view(batches, num_tokens, self.d_out)
 
-
-        # Final Linear Prediction
+        # Final linear projection
         context_vec = self.out_proj(context_vec)
+        
         return context_vec
-    
 
 
 #######     Building LLM         ######
@@ -274,27 +267,25 @@ class FeedForwardGELU(nn.Module):
     
 
 # Transfer Block
-
-class TransferBlock(nn.Module):
+class TransformerBlock(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.att = MultiHeadAttention(
-            d_in = cfg.emb_dim,
-            d_out = cfg.emb_dim,
-            context_length= cfg.context_length,
-            num_heads= cfg.n_heads,
-            dropout= cfg.dropout,
-            qkv_bias= cfg.qkv_bias
-        )
+            d_in=cfg.emb_dim,
+            d_out=cfg.emb_dim,
+            context_length=cfg.context_length,
+            num_heads=cfg.n_heads,
+            dropout=cfg.drop_rate,
+            qkv_bias=cfg.qkv_bias)
         self.ff = FeedForwardGELU(cfg)
-        self.norm1 = LayerNorm(self.emb_dim)
-        self.norm2 = LayerNorm(self.emb_dim)
+        self.norm1 = LayerNorm(cfg.emb_dim)
+        self.norm2 = LayerNorm(cfg.emb_dim)
         self.dropout = nn.Dropout(cfg.drop_rate)
 
-
     def forward(self, x):
+
         resid_conn = x
-        x = self.norm1(x)
+        x = self.norm1(x)  # pre-LayerNorm
         x = self.att(x)
         x = self.dropout(x)
         x = x + resid_conn
@@ -305,7 +296,6 @@ class TransferBlock(nn.Module):
         x = self.dropout(x)
         x = x + resid_conn
         return x
-    
 # Building the main GPT Architecture
 class GPTModel(nn.Module):
     def __init__(self, cfg):
@@ -313,22 +303,26 @@ class GPTModel(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.emb_dim)
         self.pos_emb = nn.Embedding(cfg.context_length, cfg.emb_dim)
         self.dropout_emb = nn.Dropout(cfg.drop_rate)
-        self.transformer_block = nn.Sequential( *[TransferBlock(cfg) for _ in range(cfg.n_layers)])
+        # Corrected typo: TransferBlock to TransformerBlock
+        # Accessing cfg.emb_dim instead of self.emb_dim
+        self.transformer_block = nn.Sequential(*[TransformerBlock(cfg) for _ in range(cfg.n_layers)])  
         self.final_norm = LayerNorm(cfg.emb_dim)
-        self.out_ff = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias = False)
+        self.out_ff = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias=False)
 
     def forward(self, idx):
         batch_size, seq_len = idx.shape
         tok_embeds = self.tok_emb(idx)
-        pos_embeds = self.pos_emb(torch.arange(seq_len, device = idx.device))
+        pos_embeds = self.pos_emb(torch.arange(seq_len, device=idx.device))
 
         x = tok_embeds + pos_embeds
-        x = self.dropout_emb
-        x = self.transformer_block
-        x = self.final_norm
+        # Applying dropout to the embeddings
+        x = self.dropout_emb(x)  
+        # Passing through the transformer blocks
+        x = self.transformer_block(x)  
+        # Applying final normalization
+        x = self.final_norm(x)  
         logits = self.out_ff(x)
         return logits
-    
 #############           Training loop       ############
 
 # Generate Function
@@ -344,8 +338,7 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
         idx = torch.cat((idx, idx_next), dim = 1)
 
     return idx
-
-def generate(model, idx, max_new_tokens, context_size, temperature = 0.0, top_k = None, eos_id = None):
+def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None):
     for _ in range(max_new_tokens):
         idx_cond = idx[:, -context_size:]
         with torch.no_grad():
@@ -358,18 +351,16 @@ def generate(model, idx, max_new_tokens, context_size, temperature = 0.0, top_k 
 
         if temperature > 0.0:
             logits = logits / temperature
-            probs = torch.softmax(logits, dim= -1)
-            idx_next = torch.multinomial(probs, num_samples=-1)
-
-        else: 
-            idx_next = torch.argmax(logits, dim = -1, keepdim= True)
+            probs = torch.softmax(logits, dim=-1)
+            # Changed num_samples to 1
+            idx_next = torch.multinomial(probs, num_samples=1)  
+        else:
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
         if idx_next == eos_id:
             break
-        idx = torch.cat((idx, idx_next), dim = 1)
-
+        idx = torch.cat((idx, idx_next), dim=1)
 
     return idx
-
 def generate_print_sample(model, tokenizer, device, start_context, temperature, top_k, eos_id):
     model.eval()
     context_size = model.pos_emb.weight.shape[0]
@@ -464,3 +455,28 @@ def evaluate_model(model, train_loader, val_loader, device, eval_iter):
         val_loss = calc_loss_loader(val_loader, model, device, num_batches=eval_iter)
     model.train()
     return train_loss, val_loss
+
+
+# Training the model
+
+def initialize_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            m.bias.data.fill_(0.01)
+
+torch.manual_seed(123)
+model = GPTModel(GPTConfig)
+model.to(device)
+model.apply(initialize_weights)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00009, weight_decay=0.1)
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+num_epochs = 50
+
+train_losses, val_losses, tokens_seen = train_model_simple(
+    model, train_dataloader, val_dataloader, optimizer, device,
+    num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+    start_context="Every effort moves", tokenizer=tokenizer,
+        top_k=10,temperature=0.4,eos_id=None
+)
