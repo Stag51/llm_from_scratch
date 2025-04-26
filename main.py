@@ -71,3 +71,97 @@ def text_to_tokens_ids(text, tokenizer):
 def token_ids_to_text(token_ids, tokenizer):
     flat = token_ids.squeeze(0)
     return tokenizer.decode(flat.tolist())
+
+
+
+
+
+
+
+
+#############     Stage-I Data preparation and sampling        ############
+
+class LLMDataset(Dataset):
+    def __init__(self, txt, tokenizer, max_length: int, stride: int):
+        self.tokenizer = tokenizer
+        token_ids = tokenizer.encode(txt)
+        self.input_ids = []
+        self.target_ids = []
+
+        for i in tqdm(range(0, len(token_ids) - max_length, stride)):
+            input_chunk = token_ids[i:i + max_length]
+            target_chunk = token_ids[i + 1:i + max_length + 1]
+            self.input_ids.append(torch.tensor(input_chunk))
+            self.target_ids.append(torch.tensor(target_chunk))
+    
+    def __len__(self):
+        return len(self.input_ids)
+    
+    def __getitem__(self, idx):
+        return self.input_ids[idx], self.target_ids[idx]
+    
+def LLM_DataLoader(txt, tokenizer, batch_size: int, max_length: int, stride: int,
+                   shuffle: bool = True, drop_last: bool = True):
+    llmdataset = LLMDataset(txt, tokenizer, max_length, stride)
+    llmdataloader = DataLoader(llmdataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last)
+    return llmdataloader
+
+# Loading the verdict.txt 
+
+raw_data = read_txt(DataConfig.dataPath)
+tokenizer = ttk.get_encoding("gpt2")
+
+total_token = len(tokenizer.encode(raw_data))
+print(f"-> Number of Characters : {len(raw_data)}\n-> Number of Tokens : {total_token}")
+
+# Splitting Data into training and validation
+
+train_ratio = DataConfig.train_ratio
+split_idxs = int(train_ratio * len(raw_data))
+train_data = raw_data[:split_idxs]
+val_data = raw_data[split_idxs:]
+
+print(f"Length of Training Data : {len(train_data)}")
+print(f"Length of Validation Data: {len(val_data)}")
+
+# Sanity Check 
+if total_token * (train_ratio) < GPTConfig.context_length:
+    print("Not enough tokens for the training loader. "
+          "Try to lower the `GPTConfig.context_length or "
+          "increase the `training_ratio`")
+if total_token * (1-train_ratio) < GPTConfig.context_length:
+    print("Not enough tokens for the validation loader. "
+          "Try to lower the `GPTConfig.context_length` or "
+          "decrease the `training_ratio`")
+    
+# Processing data to use in LLm as input
+
+train_dataloader = LLM_DataLoader(
+    txt = train_data,
+    tokenizer= tokenizer,
+    max_length= DataConfig.max_lenght,
+    batch_size= DataConfig.batch_size,
+    stride= DataConfig.stride,
+    shuffle= False,
+    drop_last= False
+)
+
+print("View Example:")
+dataiter = iter(train_dataloader)
+firstbatch = next(dataiter)
+print(f"Inputs: \n{firstbatch[0]} \ntarget: \n{firstbatch[1]}")
+print(firstbatch[0].shape)
+
+val_dataloader = LLM_DataLoader(
+    txt = val_data,
+    tokenizer= tokenizer,
+    max_length= DataConfig.max_lenght,
+    batch_size= DataConfig.batch_size,
+    stride= DataConfig.stride,
+    shuffle= False,
+    drop_last= False
+)
+
+dataiter = iter(val_dataloader)
+firstbatch = next(dataiter)
+print(firstbatch[0].shape)
