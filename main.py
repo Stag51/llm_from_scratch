@@ -165,3 +165,67 @@ val_dataloader = LLM_DataLoader(
 dataiter = iter(val_dataloader)
 firstbatch = next(dataiter)
 print(firstbatch[0].shape)
+
+
+
+
+
+
+
+
+
+
+
+######       Creating Attention Mechanism  #########
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_in: int, d_out:int, context_length: float, dropout: float,num_heads: int, qkv_bias: bool = False):
+        super(MultiHeadAttention, self).__init__()
+        assert d_out % num_heads == 0
+        self.d_out = d_out
+        self.num_heads = num_heads
+        self.head_dims = d_out // num_heads
+
+        self.w_queries = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.w_keys = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.w_values = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.out_proj = nn.Linear(d_out, d_out)
+        self.dropout = nn.Dropout(dropout)
+        
+        self.register_buffer(
+            'mask',
+            torch.trill(torch.ones(context_length, context_length)).unsqueeze(0).unsqueeze(0)
+        )
+
+    def forward(self, x):
+        batches, num_tokens, dim_in = x.shape
+        # Linear Projections
+        queries = self.w_queries(x)
+        keys = self.w_keys(x)
+        values = self.w_values(x)
+
+        # Reshaping and Transposing for multihead Attenstion
+
+        queries = queries.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        keys = keys.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        values = values.view(batches, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Attention Score Calculations
+
+        attn_score = (queries @ keys.transpose(2, 3)) / (self.head_dims ** 0.5)
+
+         # Applying Mask
+        attn_scores = attn_scores.masked_fill(self.mask[:, :, :num_tokens, :num_tokens] == 0, float('-inf'))
+
+        # Softmax to get attention weights
+
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        context_vec = (attn_weights @ values).transpose(1, 2)
+        context_vec = context_vec.contiguous().view(batches, num_tokens, self.d_out)
+
+
+        # Final Linear Prediction
+        context_vec = self.out_proj(context_vec)
+        return context_vec
