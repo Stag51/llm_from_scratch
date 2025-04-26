@@ -229,3 +229,104 @@ class MultiHeadAttention(nn.Module):
         # Final Linear Prediction
         context_vec = self.out_proj(context_vec)
         return context_vec
+    
+
+
+#######     Building LLM         ######
+
+
+# Createing Normalization Layer
+class LayerNorm(nn.Module):
+    def __init__(self, emb_dim):
+        super(LayerNorm, self).__init__()
+        self.eps = 1e-5
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+        self.shift = nn.Parameter(torch.zeros(emb_dim))
+
+    def forward(self, x):
+        mean = x.mean(dim = -1, keepdim = True)
+        var = x.var(dim = -1, keepdim = True)
+        norm_x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.scale * norm_x + self.shift
+
+# GELU Activation
+
+class GELU(nn.Module):
+    def __init__(self):
+        super(GELU, self).__init__()
+    def forward(self, x):
+        return 0.5 * x * (1+torch.tanh(torch.sqrt(torch.tensor(2.0/torch.pi)) * (x + 0.044715 * torch.pow(x, 3))))
+    
+# Feed Forward NetWork
+
+class FeedForwardGELU(nn.Module):
+    def __init__(self, cfg):
+        super(FeedForwardGELU, self).__init__()
+        emb_dim = cfg.emb_dim
+
+        self.layers = nn.Sequential(
+            nn.Linear(emb_dim, 4*emb_dim),
+            GELU(),
+            nn.Linear(4 * emb_dim, emb_dim)
+        )
+    def forward(self, x):
+        return self.layers(x)
+    
+
+# Transfer Block
+
+class TransferBlock(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.att = MultiHeadAttention(
+            d_in = cfg.emb_dim,
+            d_out = cfg.emb_dim,
+            context_length= cfg.context_length,
+            num_heads= cfg.n_heads,
+            dropout= cfg.dropout,
+            qkv_bias= cfg.qkv_bias
+        )
+        self.ff = FeedForwardGELU(cfg)
+        self.norm1 = LayerNorm(self.emb_dim)
+        self.norm2 = LayerNorm(self.emb_dim)
+        self.dropout = nn.Dropout(cfg.drop_rate)
+
+
+    def forward(self, x):
+        resid_conn = x
+        x = self.norm1(x)
+        x = self.att(x)
+        x = self.dropout(x)
+        x = x + resid_conn
+
+        resid_conn = x
+        x = self.norm2(x)
+        x = self.ff(x)
+        x = self.dropout(x)
+        x = x + resid_conn
+        return x
+    
+# Building the main GPT Architecture
+class GPTModel(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.emb_dim)
+        self.pos_emb = nn.Embedding(cfg.context_length, cfg.emb_dim)
+        self.dropout_emb = nn.Dropout(cfg.drop_rate)
+        self.transformer_block = nn.Sequential( *[TransferBlock(cfg) for _ in range(cfg.n_layers)])
+        self.final_norm = LayerNorm(cfg.emb_dim)
+        self.out_ff = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias = False)
+
+    def forward(self, idx):
+        batch_size, seq_len = idx.shape
+        tok_embeds = self.tok_emb(idx)
+        pos_embeds = self.pos_emb(torch.arange(seq_len, device = idx.device))
+
+        x = tok_embeds + pos_embeds
+        x = self.dropout_emb
+        x = self.transformer_block
+        x = self.final_norm
+        logits = self.out_ff(x)
+        return logits
+    
+    
